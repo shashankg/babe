@@ -27,6 +27,10 @@ import tqdm
 import warnings
 import traceback
 from datetime import datetime
+import yaml
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 # I personally don`t like doing this :)
 warnings.filterwarnings("ignore")
@@ -37,6 +41,38 @@ userAuth=False
 httpBasicCreds = None
 protocol = "http"
 httpsVerify = True
+default_config_path="/etc/babe/config.yml"
+babe_config = None
+disable_email = False
+
+def read_config(config_path):
+    try:
+        return yaml.safe_load(open(config_path))
+    except Exception:
+        print("Unable to load the configuration from path " + config_path)
+        return None
+
+def send_email(subject, content, to, cc):
+    if disable_email or None == babe_config:
+        print("Warning: Email notifications disabled")
+        return
+    server = smtplib.SMTP(babe_config['smtp_server'], babe_config['port'])
+    try:
+        msg = MIMEMultipart()
+        msg['Subject'] = subject
+        msg['From'] = babe_config['sender_email']
+        if not None == cc:
+            msg['CC'] = cc
+        msg['To'] = to
+        message_body = MIMEText(content, 'html')
+        msg.attach(message_body)
+        server.sendmail(babe_config['sender_email'], to, msg.as_string())
+        print("An email has been sent to: " + to + ", cc: " + cc)
+    except Exception as e:
+        print("An error occurred while sending email to: " + to + ", cc: " + cc)
+        print(e)
+    finally:
+        server.quit()
 
 def get_leader_url(path):
     cur_url = protocol + "://" + marathon + "/v2/leader"
@@ -115,18 +151,18 @@ def listCommand(listArgParser):
     apps(listArgParser.up, listArgParser.down)
 
 def deployCommand(deployOptionsParser):
-    #print(deployOptionsParser)
     configFile=deployOptionsParser.config
     if not os.path.isfile(configFile):
         print("Error: Deployment descriptor file " + configFile + " does not exist")
         return
     with open(configFile, 'r') as myfile:
-        data=myfile.read()
-    #requests.post(
-    #print("Config: " + configFile)
+        data = json.load(myfile)
     r = requests.post(url("/v2/apps"), data = data, headers = {'content-type': 'application/json'}, auth=httpBasicCreds, verify=httpsVerify)
     if r.status_code == 201:
         print("App deployment request accepted. Use list command to check")
+        app_owner_email = data['labels']['app.owner.email']
+        subject = "[Babe Alert] New App Deployed '"+ data['id'].replace('/', '') + "', User: "+ + getpass.getuser()
+        send_email(subject, "", babe_config['default_receiver'], app_owner_email)
     elif r.status_code == 409:
         print("Error: App already exists")
     else:
@@ -554,6 +590,7 @@ if __name__ == "__main__":
     parser.add_argument('-p', '--protocol', help='Protocol for Marathon endpoint', choices=['http','https'], default="http")
     parser.add_argument('-k', '--ssl-insecure', help='Skip SSL Check', dest='sslVerify', action='store_false')
     parser.add_argument('-U', '--user', help='HTTP Basic authentication username ( password will be asked via prompt )', default="", required=False)
+    parser.add_argument('-C', '--configuration', help='Babe configuration file path', default=default_config_path, required=False)
 
     subparsers = parser.add_subparsers(help='Available operations')
 
@@ -623,6 +660,8 @@ if __name__ == "__main__":
     decommissionClusterOptionsParser.set_defaults(func=decommissionCommand)
 
     parsed=parser.parse_args()
+    babe_config = read_config(parsed.configuration)
+    disable_email = (None == babe_config)
     marathon=parsed.endpoint
     useAuth = len(parsed.user) > 0
     if useAuth == True:
